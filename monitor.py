@@ -19,73 +19,64 @@ def send_telegram(text):
     }
     try:
         requests.post(url, json=payload, timeout=15)
-        print("Telegram sent successfully")
+        print("Telegram message sent")
     except Exception as e:
-        print("Telegram error:", e)
+        print("Error sending Telegram:", e)
 
 def get_hot_deals():
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         page = browser.new_page()
 
-        print("Loading Desidime Hot page...")
+        print("Opening Desidime...")
         page.goto("https://www.desidime.com/hot", wait_until="networkidle", timeout=90000)
-        page.wait_for_timeout(7000)
+        page.wait_for_timeout(8000)
 
-        # More accurate extraction
         deals = page.evaluate('''() => {
             const results = [];
-            const links = Array.from(document.querySelectorAll('a[href*="/deals/"]'));
+            const cards = document.querySelectorAll('.deal-card');
 
-            for (const link of links) {
-                const href = link.href;
-                if (!href || !href.includes('/deals/') || href.includes('ref=')) {
-                    // clean the link later
-                }
+            cards.forEach(card => {
+                try {
+                    // Find hotness
+                    const hotnessEl = card.querySelector('[class*="hotness"]') || card;
+                    const text = card.innerText;
+                    const match = text.match(/(\\d{2,5})°/);
+                    if (!match) return;
 
-                // Get the card / parent container
-                let card = link.closest('div') || link.parentElement;
-                if (!card) continue;
+                    const hotness = parseInt(match[1]);
+                    if (hotness < 180) return;
 
-                const text = card.innerText || "";
-                const match = text.match(/(\\d{2,5})°/);
-                if (!match) continue;
+                    // Find the main deal link
+                    const linkEl = card.querySelector('a[href*="/deals/"]');
+                    if (!linkEl) return;
 
-                const hotness = parseInt(match[1]);
-                if (hotness < 180) continue;
+                    let link = linkEl.href.split('?')[0];
+                    let title = linkEl.innerText.trim() || linkEl.getAttribute('title') || "";
 
-                // Clean title
-                let title = link.innerText.trim();
-                if (!title || title.length < 10) {
-                    title = text.split('\\n').find(line => line.length > 15 && !line.includes('°')) || text.substring(0, 100);
-                }
-                title = title.replace(/\\s+/g, ' ').trim().substring(0, 100);
+                    // Clean title
+                    title = title.replace(/\\s+/g, ' ').substring(0, 110);
+                    if (title.length < 10) {
+                        // fallback
+                        const lines = text.split('\\n').filter(l => l.trim().length > 15);
+                        title = lines[0] || "Deal";
+                    }
 
-                // Clean link (remove query parameters)
-                let cleanLink = href.split('?')[0];
+                    results.push({
+                        hotness: hotness,
+                        title: title,
+                        link: link
+                    });
+                } catch (e) {}
+            });
 
-                // Avoid duplicates and bad titles
-                if (title.toLowerCase().includes('most searched') || 
-                    title.toLowerCase().includes('best deals, coupon') ||
-                    title.toLowerCase().includes('hottest deals') ||
-                    title.length < 12) {
-                    continue;
-                }
-
-                results.push({
-                    hotness: hotness,
-                    title: title,
-                    link: cleanLink
-                });
-            }
-
-            // Remove duplicates by link
+            // Remove duplicates
             const unique = [];
             const seen = new Set();
-            for (const item of results) {
-                if (!seen.has(item.link)) {
-                    seen.add(item.link);
-                    unique.push(item);
+            for (const d of results) {
+                if (!seen.has(d.link)) {
+                    seen.add(d.link);
+                    unique.push(d);
                 }
             }
             return unique;
@@ -95,31 +86,29 @@ def get_hot_deals():
         return deals
 
 def main():
-    print(f"Running at {datetime.now()}")
+    print(f"Started at {datetime.now()}")
 
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         print("Missing Telegram credentials")
         return
 
     deals = get_hot_deals()
-    print(f"Found {len(deals)} potential deals")
+    print(f"Found {len(deals)} deal cards")
 
-    high_deals = [d for d in deals if d["hotness"] >= THRESHOLD]
-    high_deals.sort(key=lambda x: x["hotness"], reverse=True)
+    high = [d for d in deals if d["hotness"] >= THRESHOLD]
+    high.sort(key=lambda x: x["hotness"], reverse=True)
 
-    if not high_deals:
-        print(f"No deals above {THRESHOLD}°")
+    if not high:
+        print(f"No deals ≥ {THRESHOLD}°")
         return
 
-    message = f"<b>🔥 Desidime Hot Deals (≥{THRESHOLD}°)</b>\\n\\n"
+    msg = f"<b>🔥 Desidime Hot Deals (≥{THRESHOLD}°)</b>\\n\\n"
+    for d in high[:8]:
+        msg += f"<b>{d['hotness']}°</b> → {d['title']}\\n"
+        msg += f"<a href='{d['link']}'>Open Deal</a>\\n\\n"
 
-    for deal in high_deals[:8]:
-        message += f"<b>{deal['hotness']}°</b> → {deal['title']}\\n"
-        message += f"<a href='{deal['link']}'>Open Deal</a>\\n\\n"
-
-    message += f"<i>{datetime.now().strftime('%d %b %Y, %I:%M %p')}</i>"
-
-    send_telegram(message)
+    msg += f"<i>{datetime.now().strftime('%d %b, %I:%M %p')}</i>"
+    send_telegram(msg)
     print("Done")
 
 if __name__ == "__main__":
